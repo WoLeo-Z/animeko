@@ -1,0 +1,116 @@
+name: 'Build-1'
+on:
+  push:
+    paths-ignore:
+      - '**/*.md'
+    branches:
+      - 'test/1583-ci'
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+jobs:
+  build_github-macos-13:
+    name: 'Build (macOS 13 (GitHub))'
+    runs-on:
+      - 'macos-13'
+    permissions:
+      actions: 'write'
+    steps:
+      - id: 'step-0'
+        uses: 'actions/checkout@v4'
+        with:
+          submodules: 'recursive'
+      #      - id: 'step-1'
+      #        name: 'Free space for macOS'
+      #        continue-on-error: true
+      #        run: 'chmod +x ./ci-helper/free-space-macos.sh && ./ci-helper/free-space-macos.sh'
+      - id: 'step-2'
+        continue-on-error: true
+        run: 'rm local.properties'
+      - id: 'step-3'
+        name: 'Resolve JBR location'
+        shell: 'bash'
+        run: |-
+          # Expand jbrLocationExpr
+          jbr_location_expr='${{ runner.tool_cache }}/jbrsdk_jcef-21.0.5-osx-x64-b631.8.tar.gz'
+          echo "jbrLocation=$jbr_location_expr" >> $GITHUB_OUTPUT
+      - id: 'step-4'
+        name: 'Get JBR 21 for macOS AArch64'
+        env:
+          jbrLocation: '${{ steps.step-3.outputs.jbrLocation }}'
+        shell: 'bash'
+        run: |-
+          jbr_location="$jbrLocation"
+          checksum_url="https://cache-redirector.jetbrains.com/intellij-jbr/jbrsdk_jcef-21.0.5-osx-x64-b631.8.tar.gz.checksum"
+          checksum_file="checksum.tmp"
+          wget -q -O $checksum_file $checksum_url
+          
+          expected_checksum=$(awk '{print $1}' $checksum_file)
+          file_checksum=""
+          
+          if [ -f "$jbr_location" ]; then
+              file_checksum=$(shasum -a 512 "$jbr_location" | awk '{print $1}')
+          fi
+          
+          if [ "$file_checksum" != "$expected_checksum" ]; then
+              wget -q --tries=3 https://cache-redirector.jetbrains.com/intellij-jbr/jbrsdk_jcef-21.0.5-osx-x64-b631.8.tar.gz -O "$jbr_location"
+              file_checksum=$(shasum -a 512 "$jbr_location" | awk '{print $1}')
+          fi
+          
+          if [ "$file_checksum" != "$expected_checksum" ]; then
+              echo "Checksum verification failed!" >&2
+              rm -f $checksum_file
+              exit 1
+          fi
+          
+          rm -f $checksum_file
+          file "$jbr_location"
+      - id: 'step-5'
+        name: 'Setup JBR 21 for macOS '
+        uses: 'actions/setup-java@v4'
+        with:
+          java-version: '21'
+          distribution: 'jdkfile'
+          jdkFile: '${{ steps.step-3.outputs.jbrLocation }}'
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+      - id: 'step-6'
+        name: 'Dump Local Properties'
+        run: 'echo "jvm.toolchain.version=21" >> local.properties'
+      - id: 'step-7'
+        run: 'chmod -R 777 .'
+      - id: 'step-8'
+        name: 'Setup Gradle'
+        uses: 'gradle/actions/setup-gradle@v3'
+        with:
+          cache-disabled: 'true'
+      - id: 'step-9'
+        name: 'Clean and download dependencies'
+        uses: 'nick-fields/retry@v3'
+        with:
+          timeout_minutes: '60'
+          max_attempts: '3'
+          command: './gradlew "--stacktrace" "-Porg.gradle.daemon.idletimeout=60000" "-Pkotlin.native.ignoreDisabledTargets=true" "-Dfile.encoding=UTF-8" "-Dorg.gradle.jvmargs=-Xmx6g" "-Dkotlin.daemon.jvm.options=-Xmx6g"'
+      - id: 'step-10'
+        name: 'Update dev version name'
+        uses: 'nick-fields/retry@v3'
+        with:
+          timeout_minutes: '120'
+          max_attempts: '1'
+          command: './gradlew updateDevVersionNameFromGit "--no-configuration-cache" "--scan" "-Porg.gradle.daemon.idletimeout=60000" "-Pkotlin.native.ignoreDisabledTargets=true" "-Dfile.encoding=UTF-8" "-Dorg.gradle.jvmargs=-Xmx6g" "-Dkotlin.daemon.jvm.options=-Xmx6g"'
+      - id: 'step-11'
+        name: 'Prepare signing key'
+        continue-on-error: true
+        uses: 'timheuer/base64-to-file@v1.1'
+        with:
+          fileName: 'android_signing_key'
+          fileDir: './'
+          encodedString: '${{ secrets.SIGNING_RELEASE_STOREFILE }}'
+        if: '${{ (github.repository == ''open-ani/animeko'') && (!(github.event_name == ''pull_request'')) }}'
+      - id: 'step-12'
+        name: 'Check'
+        uses: 'nick-fields/retry@v3'
+        with:
+          timeout_minutes: '60'
+          max_attempts: '2'
+          command: './gradlew :app:shared:linkDebugTestIosSimulatorArm64 "--scan" "-Porg.gradle.daemon.idletimeout=60000" "-Pkotlin.native.ignoreDisabledTargets=true" "-Dfile.encoding=UTF-8" "-Dorg.gradle.jvmargs=-Xmx6g" "-Dkotlin.daemon.jvm.options=-Xmx6g"'
